@@ -149,6 +149,25 @@ select * from product WHERE search_vector @@ to_tsquery('camera');
 
 ---
 
+### Suggest related products in the same category, excluding the Purchased products by the current customer from the recommendations
+```sql
+SELECT name, category_id 
+FROM product
+WHERE category_id IN
+    (SELECT DISTINCT category_id
+     FROM order_details
+     JOIN "order" ON order_details.order_id = "order".order_id
+     JOIN product ON order_details.product_id = product.product_id
+     WHERE customer_id=2)
+AND product_id NOT IN 
+    (SELECT DISTINCT product_id
+     FROM order_details
+     JOIN "order" ON order_details.order_id = "order".order_id
+     WHERE customer_id=2);
+```
+
+---
+
 ### Write a trigger to Create a sale history [Above customer , product], when a new order is made in the "Orders" table, automatically generates a sale history record for that order,capturing details such as the order date, customer, product, total amount, and quantity. The trigger should be triggered on Order insertion
 ```sql
 CREATE OR REPLACE FUNCTION set_sale_history()
