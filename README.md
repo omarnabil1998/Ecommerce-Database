@@ -295,3 +295,140 @@ Hash Join  (cost=3887.46..104863.24 rows=99686 width=22) (actual time=61.433..37
 - In a B-Tree index All values in are stored in sorted order so When PostgreSQL scans this index It reads entries in order
 - PostgreSQL switched to GroupAggregate after the index so Now PostgreSQL sees Parallel Index Only Scan using idx_product_category_id Meaning it Reads rows from index and Rows are already ordered by category_id so PostgreSQL does not need to read the table at all.
 - Using the subquery helped because it reduced the amount of data to be joined, turned millions of product rows into ~100k aggregated rows
+
+### 2- SQL Query to Find the top customers by total spending.
+```sql
+SELECT customer.customer_id, first_name, last_name , total 
+FROM customer 
+JOIN (
+    SELECT customer_id, sum(total_amount) as total 
+    FROM "order" 
+    GROUP BY customer_id 
+    ORDER BY total DESC 
+    LIMIT 10
+) as aggregated
+ON aggregated.customer_id = customer.customer_id;
+```
+
+#### Before Optimization
+```
+Nested Loop  (cost=1969671.40..1969755.60 rows=10 width=61) (actual time=13624.342..13739.540 rows=10 loops=1)
+  ->  Limit  (cost=1969670.97..1969671.00 rows=10 width=36) (actual time=13615.155..13615.169 rows=10 loops=1)
+        ->  Sort  (cost=1969670.97..1981818.51 rows=4859015 width=36) (actual time=13504.899..13504.908 rows=10 loops=1)
+              Sort Key: (sum("order".total_amount)) DESC
+              Sort Method: top-N heapsort  Memory: 25kB
+              ->  HashAggregate  (cost=1608621.52..1864669.40 rows=4859015 width=36) (actual time=7083.139..12859.119 rows=5000000 loops=1)
+                    Group Key: "order".customer_id
+                    Planned Partitions: 256  Batches: 257  Memory Usage: 8209kB  Disk Usage: 769216kB
+                    ->  Seq Scan on "order"  (cost=0.00..327386.64 rows=19999764 width=9) (actual time=0.015..1343.014 rows=20000000 loops=1)
+  ->  Index Scan using customer_pkey on customer  (cost=0.43..8.45 rows=1 width=29) (actual time=12.427..12.427 rows=1 loops=10)
+        Index Cond: (customer_id = "order".customer_id)
+Planning Time: 0.172 ms
+JIT:
+  Functions: 17
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 1.079 ms, Inlining 37.413 ms, Optimization 76.239 ms, Emission 51.165 ms, Total 165.896 ms
+Execution Time: 13855.064 ms
+```
+
+#### After Optimization
+
+```sql
+CREATE INDEX idx_order_customer_id ON "order"(customer_id,total_amount);
+ANALYZE "order";
+```
+
+```
+Nested Loop  (cost=878653.26..878737.45 rows=10 width=61) (actual time=8751.149..8751.248 rows=10 loops=1)
+  ->  Limit  (cost=878652.83..878652.85 rows=10 width=36) (actual time=8751.101..8751.104 rows=10 loops=1)
+        ->  Sort  (cost=878652.83..889505.79 rows=4341187 width=36) (actual time=8685.737..8685.738 rows=10 loops=1)
+              Sort Key: (sum("order".total_amount)) DESC
+              Sort Method: top-N heapsort  Memory: 25kB
+              ->  GroupAggregate  (cost=0.56..784841.34 rows=4341187 width=36) (actual time=0.402..7985.130 rows=5000000 loops=1)
+                    Group Key: "order".customer_id
+                    ->  Index Only Scan using idx_order_customer_id on "order"  (cost=0.56..630576.14 rows=20000072 width=9) (actual time=0.376..4587.526 rows=20000000 loops=1)
+                          Heap Fetches: 900008
+  ->  Index Scan using customer_pkey on customer  (cost=0.43..8.45 rows=1 width=29) (actual time=0.011..0.011 rows=1 loops=10)
+        Index Cond: (customer_id = "order".customer_id)
+Planning Time: 0.271 ms
+JIT:
+  Functions: 10
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 1.531 ms, Inlining 10.095 ms, Optimization 31.340 ms, Emission 23.953 ms, Total 66.919 ms
+Execution Time: 8752.859 ms
+```
+
+| Execution Time Before Optimization | Optimization Technique                                      | Execution Time After Optimization |
+| ---------------------------------- | ----------------------------------------------------------- | --------------------------------- |
+| 13855.064 ms                       | Added Composite Index on on order(customer_id,total_amount) | 8752.859 ms                       |
+
+- Now After optimzation we changed the sequential scan on order to be a covering index so we don't need to access the table 
+
+### 3- SQL Query to Retrieve the most recent orders with customer information with 1000 orders.
+```sql
+SELECT customer.customer_id, first_name, last_name, order_date 
+FROM customer 
+JOIN (
+    SELECT customer_id, order_date
+    FROM "order" 
+    ORDER BY order_date DESC 
+    LIMIT 1000
+) as aggregated
+ON aggregated.customer_id = customer.customer_id;
+```
+
+#### Before Optimization
+```
+Nested Loop  (cost=668632.40..670893.44 rows=1000 width=33) (actual time=1805.358..1817.677 rows=1000 loops=1)
+  ->  Limit  (cost=668631.96..668748.64 rows=1000 width=8) (actual time=1805.308..1815.876 rows=1000 loops=1)
+        ->  Gather Merge  (cost=668631.96..2613219.09 rows=16666726 width=8) (actual time=1747.580..1758.093 rows=1000 loops=1)
+              Workers Planned: 2
+              Workers Launched: 2
+              ->  Sort  (cost=667631.94..688465.35 rows=8333363 width=8) (actual time=1725.293..1725.336 rows=1000 loops=3)
+                    Sort Key: "order".order_date DESC
+                    Sort Method: top-N heapsort  Memory: 88kB
+                    Worker 0:  Sort Method: top-N heapsort  Memory: 88kB
+                    Worker 1:  Sort Method: top-N heapsort  Memory: 88kB
+                    ->  Parallel Seq Scan on "order"  (cost=0.00..210722.63 rows=8333363 width=8) (actual time=80.974..798.673 rows=6666667 loops=3)
+  ->  Memoize  (cost=0.44..8.29 rows=1 width=29) (actual time=0.002..0.002 rows=1 loops=1000)
+        Cache Key: "order".customer_id
+        Cache Mode: logical
+        Hits: 0  Misses: 1000  Evictions: 0  Overflows: 0  Memory Usage: 128kB
+        ->  Index Scan using customer_pkey on customer  (cost=0.43..8.28 rows=1 width=29) (actual time=0.001..0.001 rows=1 loops=1000)
+              Index Cond: (customer_id = "order".customer_id)
+Planning Time: 0.206 ms
+JIT:
+  Functions: 17
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 2.697 ms, Inlining 192.824 ms, Optimization 36.410 ms, Emission 71.308 ms, Total 303.238 ms
+Execution Time: 1818.241 ms
+```
+
+#### After Optimization
+
+```sql
+CREATE INDEX idx_order_order_date ON "order"(order_date);
+ANALYZE "order";
+```
+
+```
+Nested Loop  (cost=0.88..2012.79 rows=1000 width=33) (actual time=0.038..2.241 rows=1000 loops=1)
+  ->  Limit  (cost=0.44..25.19 rows=1000 width=8) (actual time=0.017..0.260 rows=1000 loops=1)
+        ->  Index Scan Backward using idx_order_order_date on "order"  (cost=0.44..495073.52 rows=20000072 width=8) (actual time=0.016..0.200 rows=1000 loops=1)
+  ->  Memoize  (cost=0.44..8.29 rows=1 width=29) (actual time=0.002..0.002 rows=1 loops=1000)
+        Cache Key: "order".customer_id
+        Cache Mode: logical
+        Hits: 0  Misses: 1000  Evictions: 0  Overflows: 0  Memory Usage: 128kB
+        ->  Index Scan using customer_pkey on customer  (cost=0.43..8.28 rows=1 width=29) (actual time=0.001..0.001 rows=1 loops=1000)
+              Index Cond: (customer_id = "order".customer_id)
+Planning Time: 0.247 ms
+Execution Time: 2.291 ms
+```
+
+| Execution Time Before Optimization | Optimization Technique           | Execution Time After Optimization |
+| ---------------------------------- | -------------------------------- | --------------------------------- |
+| 1818.241 ms                        | Added Index on order(order_date) | 2.291 ms                          |
+
+- Before optimzation PostgreSQL had to Sequentially scan the entire order table (≈ 20M rows) Sort by order_date DESC, Keep only the top 1000 rows
+- But Now it can do Backward index scan on idx_order_order_date, Reads rows already ordered and Stops immediately after 1000 rows, an index on order.customer_id is NOT needed because PostgreSQL never searches the order table by customer_id, The order rows are already chosen by order_date
+- So instead of sequential scan and then sorting we added an index on order_date so that sorting isnot needed and No full table scan is needed
