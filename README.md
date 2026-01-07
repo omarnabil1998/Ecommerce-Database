@@ -294,3 +294,4 @@ Hash Join  (cost=3887.46..104863.24 rows=99686 width=22) (actual time=61.433..37
 - original query used HashAggregate so Before the index existed, PostgreSQL read the table with Parallel Seq Scan on product so Rows are read in physical order ≠ ordered by category_id
 - In a B-Tree index All values in are stored in sorted order so When PostgreSQL scans this index It reads entries in order
 - PostgreSQL switched to GroupAggregate after the index so Now PostgreSQL sees Parallel Index Only Scan using idx_product_category_id Meaning it Reads rows from index and Rows are already ordered by category_id so PostgreSQL does not need to read the table at all.
+- Using the subquery helped because it reduced the amount of data to be joined, turned millions of product rows into ~100k aggregated rows
