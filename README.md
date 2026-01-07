@@ -207,3 +207,90 @@ BEGIN;
 SELECT * FROM product WHERE product_id=211 FOR UPDATE;
 COMMIT;
 ```
+
+## Optimize Queries
+
+### 1- SQL Query to Retrieve the total number of products in each category.
+```sql
+SELECT category_name, total_products
+FROM category  
+JOIN (
+    SELECT category_id, count(*) as total_products 
+    FROM product 
+    GROUP BY category_id
+) as aggregated 
+ON aggregated.category_id = category.category_id;
+```
+
+#### Before Optimization
+```
+Merge Join  (cost=250891.37..282219.15 rows=100902 width=22) (actual time=893.117..1029.586 rows=100000 loops=1)
+  Merge Cond: (category.category_id = product.category_id)
+  ->  Index Scan using category_pkey on category  (cost=0.29..3244.29 rows=100000 width=18) (actual time=0.018..16.455 rows=100000 loops=1)
+  ->  Finalize GroupAggregate  (cost=250891.08..276454.57 rows=100902 width=12) (actual time=886.833..988.114 rows=100000 loops=1)
+        Group Key: product.category_id
+        ->  Gather Merge  (cost=250891.08..274436.53 rows=201804 width=12) (actual time=886.798..959.981 rows=300000 loops=1)
+              Workers Planned: 2
+              Workers Launched: 2
+              ->  Sort  (cost=249891.06..250143.31 rows=100902 width=12) (actual time=842.082..852.148 rows=100000 loops=3)
+                    Sort Key: product.category_id
+                    Sort Method: external merge  Disk: 2552kB
+                    Worker 0:  Sort Method: external merge  Disk: 2552kB
+                    Worker 1:  Sort Method: external merge  Disk: 2552kB
+                    ->  Partial HashAggregate  (cost=224219.74..241504.79 rows=100902 width=12) (actual time=721.360..799.639 rows=100000 loops=3)
+                          Group Key: product.category_id
+                          Batches: 5  Memory Usage: 8241kB  Disk Usage: 11160kB
+                          Worker 0:  Batches: 5  Memory Usage: 8241kB  Disk Usage: 7776kB
+                          Worker 1:  Batches: 5  Memory Usage: 8241kB  Disk Usage: 11064kB
+                          ->  Parallel Seq Scan on product  (cost=0.00..107032.32 rows=2083332 width=4) (actual time=0.027..219.962 rows=1666667 loops=3)
+Planning Time: 0.113 ms
+JIT:
+  Functions: 29
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 2.776 ms, Inlining 0.000 ms, Optimization 3.261 ms, Emission 28.593 ms, Total 34.630 ms
+Execution Time: 1038.367 ms
+(25 rows)
+```
+
+#### After Optimization
+
+```sql
+CREATE INDEX idx_product_category_id ON product(category_id);
+ANALYZE product;
+```
+
+```
+Hash Join  (cost=3887.46..104863.24 rows=99686 width=22) (actual time=61.433..375.721 rows=100000 loops=1)
+   Hash Cond: (product.category_id = category.category_id)
+   ->  Finalize GroupAggregate  (cost=1000.46..100717.69 rows=99686 width=12) (actual time=39.911..328.565 rows=100000 loops=1)
+         Group Key: product.category_id
+         ->  Gather Merge  (cost=1000.46..98723.97 rows=199372 width=12) (actual time=39.882..312.140 rows=100000 loops=1)
+               Workers Planned: 2
+               Workers Launched: 2
+               ->  Partial GroupAggregate  (cost=0.43..74711.47 rows=99686 width=12) (actual time=6.115..209.494 rows=33333 loops=3)
+                     Group Key: product.category_id
+                     ->  Parallel Index Only Scan using idx_product_category_id on product  (cost=0.43..63297.91 rows=2083340 width=4) (actual time=0.155..126.217 rows=1666667 loops=3)
+                           Heap Fetches: 0
+   ->  Hash  (cost=1637.00..1637.00 rows=100000 width=18) (actual time=21.340..21.341 rows=100000 loops=1)
+         Buckets: 131072  Batches: 1  Memory Usage: 6102kB
+         ->  Seq Scan on category  (cost=0.00..1637.00 rows=100000 width=18) (actual time=0.014..8.644 rows=100000 loops=1)
+ Planning Time: 0.349 ms
+ JIT:
+   Functions: 20
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 1.664 ms, Inlining 0.000 ms, Optimization 0.881 ms, Emission 16.885 ms, Total 19.430 ms
+ Execution Time: 379.727 ms
+(20 rows)
+```
+
+| Execution Time Before Optimization | Optimization Technique                             | Execution Time After Optimization |
+| ---------------------------------- | -------------------------------------------------- | --------------------------------- |
+| 1038.367 ms                        | Added Index on Foreign key on Product(category_id) | 379.727 ms                        |
+
+- PostgreSQL have 2 main ways to Group rows that have the same category_id: HashAggregate & GroupAggregate
+- In HashAggregate Think of a hash table, PostgreSQL will Read a row, Compute a hash of category_id and Put/update it in a hash table in memory
+  - It Works even if data is random order but it Needs memory, If hash table is large → spills to disk → slow and Extra CPU cost to hash every row
+- In GroupAggregate it works only if the input rows are already sorted by the GROUP BY column, No hash table. Just a counter, Very low memory usage
+- original query used HashAggregate so Before the index existed, PostgreSQL read the table with Parallel Seq Scan on product so Rows are read in physical order ≠ ordered by category_id
+- In a B-Tree index All values in are stored in sorted order so When PostgreSQL scans this index It reads entries in order
+- PostgreSQL switched to GroupAggregate after the index so Now PostgreSQL sees Parallel Index Only Scan using idx_product_category_id Meaning it Reads rows from index and Rows are already ordered by category_id so PostgreSQL does not need to read the table at all.
