@@ -81,6 +81,54 @@ CREATE TABLE sale_history (
 );
 ```
 
+### Relational Schema
+
+```mermaid
+erDiagram
+    CATEGORY {
+        int category_id PK
+        varchar category_name
+    }
+
+    PRODUCT {
+        int product_id PK
+        int category_id FK
+        varchar name
+        varchar description
+        decimal price
+        int stock_quantity
+    }
+
+    CUSTOMER {
+        int customer_id PK
+        varchar first_name
+        varchar last_name
+        varchar email
+        varchar password
+    }
+
+    ORDER {
+        int order_id PK
+        int customer_id FK
+        date order_date
+        decimal total_amount
+    }
+
+    ORDER_DETAILS {
+        int order_detail_id PK
+        int order_id FK
+        int product_id FK
+        int quantity
+        decimal unit_price
+    }
+
+    %% Relationships (Foreign Keys)
+    CATEGORY ||--o{ PRODUCT : "category_id"
+    CUSTOMER ||--o{ ORDER : "customer_id"
+    ORDER ||--o{ ORDER_DETAILS : "order_id"
+    PRODUCT ||--o{ ORDER_DETAILS : "product_id"
+```
+
 ## 2️⃣ SQL Queries
 
 ### 📅 Daily Revenue
