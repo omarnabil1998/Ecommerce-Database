@@ -432,3 +432,120 @@ Execution Time: 2.291 ms
 - Before optimzation PostgreSQL had to Sequentially scan the entire order table (≈ 20M rows) Sort by order_date DESC, Keep only the top 1000 rows
 - But Now it can do Backward index scan on idx_order_order_date, Reads rows already ordered and Stops immediately after 1000 rows, an index on order.customer_id is NOT needed because PostgreSQL never searches the order table by customer_id, The order rows are already chosen by order_date
 - So instead of sequential scan and then sorting we added an index on order_date so that sorting isnot needed and No full table scan is needed
+
+### 4- SQL Query to List products that have low stock quantities of less than 10 quantities.
+```sql
+SELECT name, stock_quantity 
+FROM product 
+WHERE stock_quantity < 10;
+```
+
+#### Before Optimization
+```
+Gather  (cost=1000.00..121935.00 rows=86942 width=19) (actual time=10.136..251.838 rows=95000 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on product  (cost=0.00..112240.80 rows=36226 width=19) (actual time=11.617..213.543 rows=31667 loops=3)
+         Filter: (stock_quantity < 10)
+         Rows Removed by Filter: 1635000
+ Planning Time: 0.052 ms
+ JIT:
+   Functions: 12
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 0.800 ms, Inlining 0.000 ms, Optimization 4.421 ms, Emission 30.203 ms, Total 35.424 ms
+ Execution Time: 255.235 ms
+(12 rows)
+```
+
+#### After Optimization
+
+```sql
+CREATE INDEX idx_product_stock_quantity ON product(stock_quantity) INCLUDE (name) WHERE stock_quantity < 10;
+ANALYZE product;
+```
+
+```
+Index Only Scan using idx_product_stock_quantity on product  (cost=0.42..3119.27 rows=88190 width=19) (actual time=0.046..14.129 rows=95000 loops=1)
+  Heap Fetches: 0
+Planning Time: 0.200 ms
+Execution Time: 17.014 ms
+(4 rows)
+```
+
+| Execution Time Before Optimization | Optimization Technique                                      | Execution Time After Optimization |
+| ---------------------------------- | ----------------------------------------------------------- | --------------------------------- |
+| 255.235 ms                         | Added conditional covering Index on product(stock_quantity) | 17.014 ms                         |
+
+- Added a conditional index so that it stores entries only for rows that match
+- Note Index key columns are Used for WHERE conditions, ORDER BY, Index scans and Stored in sorted order while INCLUDE columns Stored only in the leaf pages Not part of sorting and Not used for filtering 
+- So if we added INDEX ON product(stock_quantity, name), name is now part of the sorted key, Sorting + comparisons are more expensive, Larger index and No benefit unless we ORDER BY name
+- We Put columns in the index key only if they are used to find or order rows and we put columns in INCLUDE only if they are used to return data.
+
+### 5- SQL Query to Calculate the revenue generated from each product category.
+```sql
+SELECT category.category_id, category_name, SUM(quantity * unit_price) AS revenue
+FROM order_details
+JOIN product ON order_details.product_id = product.product_id
+JOIN category ON product.category_id = category.category_id
+GROUP BY category.category_id, category_name;
+```
+
+#### Before Optimization
+```
+Finalize GroupAggregate  (cost=3055002.66..3081087.62 rows=100000 width=50) (actual time=139708.484..140057.307 rows=100000 loops=1)
+   Group Key: category.category_id
+   ->  Gather Merge  (cost=3055002.66..3078337.62 rows=200000 width=50) (actual time=139708.439..139942.660 rows=300000 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Sort  (cost=3054002.63..3054252.63 rows=100000 width=50) (actual time=139201.411..139216.344 rows=100000 loops=3)
+               Sort Key: category.category_id
+               Sort Method: external merge  Disk: 9192kB
+               Worker 0:  Sort Method: external merge  Disk: 9192kB
+               Worker 1:  Sort Method: external merge  Disk: 9192kB
+               ->  Partial HashAggregate  (cost=2756197.59..3042278.31 rows=100000 width=50) (actual time=128886.383..139152.229 rows=100000 loops=3)
+                     Group Key: category.category_id
+                     Planned Partitions: 8  Batches: 9  Memory Usage: 8273kB  Disk Usage: 633352kB
+                     Worker 0:  Batches: 9  Memory Usage: 8273kB  Disk Usage: 653880kB
+                     Worker 1:  Batches: 9  Memory Usage: 8273kB  Disk Usage: 655912kB
+                     ->  Hash Join  (cost=144101.01..991874.70 rows=20833333 width=27) (actual time=69201.454..118379.719 rows=16666667 loops=3)
+                           Hash Cond: (product.category_id = category.category_id)
+                           ->  Parallel Hash Join  (cost=141214.01..934297.89 rows=20833333 width=13) (actual time=68942.745..110499.399 rows=16666667 loops=3)
+                                 Hash Cond: (order_details.product_id = product.product_id)
+                                 ->  Parallel Seq Scan on order_details  (cost=0.00..526805.33 rows=20833333 width=13) (actual time=9.837..64907.646 rows=16666667 loops=3)
+                                 ->  Parallel Hash  (cost=107032.78..107032.78 rows=2083378 width=8) (actual time=704.843..704.844 rows=1666667 loops=3)
+                                       Buckets: 262144  Batches: 64  Memory Usage: 5184kB
+                                       ->  Parallel Seq Scan on product  (cost=0.00..107032.78 rows=2083378 width=8) (actual time=0.036..314.497 rows=1666667 loops=3)
+                           ->  Hash  (cost=1637.00..1637.00 rows=100000 width=18) (actual time=258.001..258.001 rows=100000 loops=3)
+                                 Buckets: 131072  Batches: 1  Memory Usage: 5994kB
+                                 ->  Seq Scan on category  (cost=0.00..1637.00 rows=100000 width=18) (actual time=0.020..8.829 rows=100000 loops=3)
+ Planning Time: 0.206 ms
+ JIT:
+   Functions: 75
+   Options: Inlining true, Optimization true, Expressions true, Deforming true
+   Timing: Generation 21.188 ms, Inlining 375.354 ms, Optimization 291.964 ms, Emission 275.882 ms, Total 964.387 ms
+ Execution Time: 140128.619 ms
+(32 rows)
+```
+
+#### After Optimization
+
+```sql
+CREATE MATERIALIZED VIEW category_revenue_mv AS
+SELECT category.category_id, category_name, SUM(quantity * unit_price) AS revenue
+FROM order_details
+JOIN product ON order_details.product_id = product.product_id
+JOIN category ON product.category_id = category.category_id
+GROUP BY category.category_id, category_name;
+
+explain analyze SELECT * FROM category_revenue_mv;
+```
+
+```
+Seq Scan on category_revenue_mv  (cost=0.00..1768.00 rows=100000 width=24) (actual time=0.007..6.018 rows=100000 loops=1)
+Planning Time: 0.031 ms
+Execution Time: 8.873 ms
+```
+
+| Execution Time Before Optimization | Optimization Technique                  | Execution Time After Optimization |
+| ---------------------------------- | --------------------------------------- | --------------------------------- |
+| 140128.619 ms                      | Created MATERIALIZED view for the query | 8.873 ms                          |
